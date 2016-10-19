@@ -46,6 +46,8 @@
 
 #include <algorithm>
 
+#include <hpctoolkit.h>
+
 #include "thread_mpi/threads.h"
 
 #include "gromacs/commandline/filenm.h"
@@ -1766,6 +1768,9 @@ double gmx::do_md(FILE *fplog, t_commrec *cr, int nfile, const t_filenm fnm[],
                           "resetting counters later in the run, e.g. with gmx "
                           "mdrun -resetstep.", step);
             }
+
+            hpctoolkit_sampling_start();
+
             reset_all_counters(fplog, cr, step, &step_rel, ir, wcycle, nrnb, walltime_accounting,
                                use_GPU(fr->nbv) ? fr->nbv : NULL);
             wcycle_set_reset_counters(wcycle, -1);
