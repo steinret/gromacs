@@ -73,7 +73,7 @@ elseif(${GMX_SIMD} MATCHES "^(AVX)")
     # Support for --enable-avx2 was only added in 3.3.5, but
     # configuring with it is at worst a warning, even on an earlier
     # version.
-    set(_fftw_simd_support_level --enable-sse2;--enable-avx;--enable-avx2;--enable-avx512)
+    set(_fftw_simd_support_level --enable-sse2;--enable-avx;--enable-avx2;--disable-avx512)
 elseif(${GMX_SIMD} MATCHES "^(VSX)")
     set(_fftw_simd_support_level --enable-vsx)
 endif()
