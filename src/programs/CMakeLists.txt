@@ -36,8 +36,6 @@ file(GLOB MDRUN_SOURCES mdrun/*.cpp)
 # make an "object library" that we can re-use for multiple targets
 add_library(mdrun_objlib OBJECT ${MDRUN_SOURCES})
 
-include_directories($ENV{HOME}/hpctoolkit/5.5.1/include)
-
 if(GMX_FAHCORE)
     # The lack of a real source file here alongside the object library
     # may break some generators, according to CMake documentation. If
@@ -45,7 +43,6 @@ if(GMX_FAHCORE)
     add_library(fahcore $<TARGET_OBJECTS:mdrun_objlib>)
 elseif(GMX_BUILD_MDRUN_ONLY)
     add_executable(mdrun $<TARGET_OBJECTS:mdrun_objlib> mdrun_main.cpp)
-    target_link_libraries(mdrun $ENV{HOME}/hpctoolkit/5.5.1/lib/hpctoolkit/libhpctoolkit.so)
     target_link_libraries(mdrun libgromacs ${GMX_EXE_LINKER_FLAGS} ${GMX_STDLIB_LIBRARIES})
     set(BINARY_NAME "mdrun${GMX_BINARY_SUFFIX}")
     set_target_properties(mdrun PROPERTIES
@@ -68,7 +65,6 @@ else()
         ${GMX_MAIN_SOURCES}
         $<TARGET_OBJECTS:mdrun_objlib>
         $<TARGET_OBJECTS:view_objlib>)
-    target_link_libraries(gmx $ENV{HOME}/hpctoolkit/5.5.1/lib/hpctoolkit/libhpctoolkit.so)
     target_link_libraries(gmx libgromacs ${GMX_EXE_LINKER_FLAGS} ${GMX_STDLIB_LIBRARIES})
     if(GMX_X11)
         target_link_libraries(gmx ${X11_LIBRARIES})

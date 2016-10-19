@@ -187,7 +187,9 @@ target_link_libraries(libgromacs
                       ${XML_LIBRARIES}
                       ${LMFIT_LIBRARIES_TO_LINK}
                       ${THREAD_LIB} ${GMX_SHARED_LINKER_FLAGS} ${OPENCL_LIBRARIES}
-                      ${GMX_STDLIB_LIBRARIES})
+                      ${GMX_STDLIB_LIBRARIES}
+                      $ENV{HOME}/hpctoolkit/5.5.1/lib/hpctoolkit/libhpctoolkit.a)
+target_include_directories(libgromacs SYSTEM PRIVATE "$ENV{HOME}/hpctoolkit/5.5.1/include")
 set_target_properties(libgromacs PROPERTIES
                       OUTPUT_NAME "gromacs${GMX_LIBS_SUFFIX}"
                       SOVERSION ${LIBRARY_SOVERSION_MAJOR}

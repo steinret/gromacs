@@ -44,6 +44,8 @@
 
 #include <array>
 
+#include <hpctoolkit.h>
+
 #include "gromacs/gmxlib/md_logging.h"
 #include "gromacs/mdtypes/commrec.h"
 #include "gromacs/timing/cyclecounter.h"
@@ -363,6 +365,8 @@ void wallcycle_get(gmx_wallcycle_t wc, int ewc, int *n, double *c)
 void wallcycle_reset_all(gmx_wallcycle_t wc)
 {
     int i;
+
+    hpctoolkit_sampling_start();
 
     if (wc == NULL)
     {
