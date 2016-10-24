@@ -49,6 +49,7 @@
 #include <algorithm>
 #include <iostream>
 #include <vector>
+#include <array>
 #include <iterator>
 
 #include "gromacs/domdec/domdec_network.h"
@@ -472,48 +473,60 @@ void dd_move_x(gmx_domdec_t *dd, matrix box, rvec x[])
 
 void dd_move_f(gmx_domdec_t *dd, rvec f[], rvec *fshift)
 {
-    int                    nzone, nat_tot, n, d, p, i, j, at0, at1, zone;
-    int                   *index, *cgindex;
-    gmx_domdec_comm_t     *comm;
-    gmx_domdec_comm_dim_t *cd;
-    gmx_domdec_ind_t      *ind;
-    rvec                  *buf, *sbuf;
-    ivec                   vis;
-    int                    is;
-    gmx_bool               bShiftForcesNeedPbc, bScrew;
+    //int                    nzone, nat_tot, n, d, p, i, j, at0, at1, zone;
+    //int                   *index, *cgindex;
+    //gmx_domdec_comm_t     *comm;
+    //gmx_domdec_comm_dim_t *cd;
+    //gmx_domdec_ind_t      *ind;
+    //rvec                  *buf, *sbuf;
+    //ivec                   vis;
+    //int                    is;
+    //gmx_bool               bShiftForcesNeedPbc, bScrew;
 
-    comm = dd->comm;
+	gmx_domdec_comm_t *comm = dd->comm;
 
-    cgindex = dd->cgindex;
+    int *cgindex = dd->cgindex;
 
-    buf = comm->vbuf.v;
+    rvec* buf = comm->vbuf.v;
 
-    nzone   = comm->zones.n/2;
-    nat_tot = dd->nat_tot;
-    for (d = dd->ndim-1; d >= 0; d--)
-    {
-        /* Only forces in domains near the PBC boundaries need to
-           consider PBC in the treatment of fshift */
-        bShiftForcesNeedPbc   = (dd->ci[dd->dim[d]] == 0);
-        bScrew                = (bShiftForcesNeedPbc && dd->bScrewPBC && dd->dim[d] == XX);
-        if (fshift == NULL && !bScrew)
-        {
-            bShiftForcesNeedPbc = FALSE;
-        }
-        /* Determine which shift vector we need */
-        clear_ivec(vis);
-        vis[dd->dim[d]] = 1;
-        is              = IVEC2IS(vis);
+	std::array<std::unique_ptr<rvec>, 3> superBuf;
+	std::array<std::size_t, 3> superBufDimSize;
+	for (std::size_t d = 0; d < 3; ++d) {
+		gmx_domdec_comm_dim_t* cd = &comm->cd[d];
+		superBufDimSize[d] = comm->vbuf.nalloc;
+		auto superBufSize = cd->np * comm->vbuf.nalloc;
+		superBuf[d] = std::unique_ptr<rvec>(new rvec[superBufSize]);
+	}
+	auto getBuf = [&](std::size_t d, std::size_t idx) {return superBuf[d].get() + (superBufDimSize[d] * idx); };
 
-        cd = &comm->cd[d];
-		std::size_t masterBufSize = cd->np * comm->vbuf.nalloc;
-		auto masterBuf = std::unique_ptr<rvec>(new rvec[masterBufSize]);
-		auto getBuf = [&](std::size_t idx) {return masterBuf.get() + (comm->vbuf.nalloc * idx); };
-		std::vector<MPI_Request> masterRequests;
-		for (p = cd->np - 1; p >= 0; p--)
+    int nzone   = comm->zones.n/2;
+    int nat_tot = dd->nat_tot;
+	for (int d = dd->ndim - 1; d >= 0; d--)
+	{
+		/* Only forces in domains near the PBC boundaries need to
+		   consider PBC in the treatment of fshift */
+		gmx_bool bShiftForcesNeedPbc = (dd->ci[dd->dim[d]] == 0);
+		const gmx_bool bScrew = (bShiftForcesNeedPbc && dd->bScrewPBC && dd->dim[d] == XX);
+		if (fshift == NULL && !bScrew)
 		{
-			ind = &cd->ind[p];
+			bShiftForcesNeedPbc = FALSE;
+		}
+		/* Determine which shift vector we need */
+		ivec vis;
+		clear_ivec(vis);
+		vis[dd->dim[d]] = 1;
+		const int is = IVEC2IS(vis);
+
+		gmx_domdec_comm_dim_t* cd = &comm->cd[d];
+		//std::size_t masterBufSize = cd->np * comm->vbuf.nalloc;
+		//auto masterBuf = std::unique_ptr<rvec>(new rvec[masterBufSize]);
+		//auto getBuf = [&](std::size_t idx) {return masterBuf.get() + (comm->vbuf.nalloc * idx); };
+		std::vector<MPI_Request> masterRequests;
+		for (int p = cd->np - 1; p >= 0; p--)
+		{
+			gmx_domdec_ind_t *ind = &cd->ind[p];
 			nat_tot -= ind->nrecv[nzone + 1];
+			rvec* sbuf;
 			if (cd->bInPlace)
 			{
 				sbuf = f + nat_tot;
@@ -521,10 +534,10 @@ void dd_move_f(gmx_domdec_t *dd, rvec f[], rvec *fshift)
 			else
 			{
 				sbuf = comm->vbuf2.v;
-				j = 0;
-				for (zone = 0; zone < nzone; zone++)
+				int j = 0;
+				for (int zone = 0; zone < nzone; zone++)
 				{
-					for (i = ind->cell2at0[zone]; i < ind->cell2at1[zone]; i++)
+					for (int i = ind->cell2at0[zone]; i < ind->cell2at1[zone]; i++)
 					{
 						copy_rvec(f[i], sbuf[j]);
 						j++;
@@ -549,27 +562,46 @@ void dd_move_f(gmx_domdec_t *dd, rvec f[], rvec *fshift)
 				async_dd_sendrecv_rvec(
 					dd, d, dddirForward,
 					sbuf, ind->nrecv[nzone + 1],
-					getBuf(p), ind->nsend[nzone + 1]);
+					getBuf(d, p), ind->nsend[nzone + 1]);
 			std::copy(reqs.begin(), reqs.end(), std::back_inserter(masterRequests));
 		}
+	//}
 
-		MPI_Waitall(masterRequests.size(), masterRequests.data(), MPI_STATUSES_IGNORE);
+		MPI_Waitall(masterRequests.size(), masterRequests.data(), MPI_STATUSES_IGNORE);	
 
-		for (p = cd->np - 1; p >= 0; p--)
+	//for (int d = dd->ndim - 1; d >= 0; d--)
+	//{
+		///* Only forces in domains near the PBC boundaries need to
+		//consider PBC in the treatment of fshift */
+		//gmx_bool bShiftForcesNeedPbc = (dd->ci[dd->dim[d]] == 0);
+		//const gmx_bool bScrew = (bShiftForcesNeedPbc && dd->bScrewPBC && dd->dim[d] == XX);
+		//if (fshift == NULL && !bScrew)
+		//{
+		//	bShiftForcesNeedPbc = FALSE;
+		//}
+		///* Determine which shift vector we need */
+		//ivec vis;
+		//clear_ivec(vis);
+		//vis[dd->dim[d]] = 1;
+		//const int is = IVEC2IS(vis);
+
+		//gmx_domdec_comm_dim_t* cd = &comm->cd[d];
+
+		for (int p = cd->np - 1; p >= 0; p--)
 		{
-			ind = &cd->ind[p];
-            index = ind->index;
+			gmx_domdec_ind_t *ind = &cd->ind[p];
+            int *index = ind->index;
             /* Add the received forces */
-            n = 0;
+            int n = 0;
             if (!bShiftForcesNeedPbc)
             {
-                for (i = 0; i < ind->nsend[nzone]; i++)
+                for (int i = 0; i < ind->nsend[nzone]; i++)
                 {
-                    at0 = cgindex[index[i]];
-                    at1 = cgindex[index[i]+1];
-                    for (j = at0; j < at1; j++)
+                    int at0 = cgindex[index[i]];
+                    int at1 = cgindex[index[i]+1];
+                    for (int j = at0; j < at1; j++)
                     {
-                        rvec_inc(f[j], getBuf(p)[n]);
+                        rvec_inc(f[j], getBuf(d,p)[n]);
                         n++;
                     }
                 }
@@ -579,35 +611,37 @@ void dd_move_f(gmx_domdec_t *dd, rvec f[], rvec *fshift)
                 /* fshift should always be defined if this function is
                  * called when bShiftForcesNeedPbc is true */
                 assert(NULL != fshift);
-                for (i = 0; i < ind->nsend[nzone]; i++)
+                for (int i = 0; i < ind->nsend[nzone]; i++)
                 {
-                    at0 = cgindex[index[i]];
-                    at1 = cgindex[index[i]+1];
-                    for (j = at0; j < at1; j++)
+                    int at0 = cgindex[index[i]];
+                    int at1 = cgindex[index[i]+1];
+					auto buf = getBuf(d, p);
+                    for (int j = at0; j < at1; j++)
                     {
-                        rvec_inc(f[j], getBuf(p)[n]);
+                        rvec_inc(f[j], buf[n]);
                         /* Add this force to the shift force */
-                        rvec_inc(fshift[is], getBuf(p)[n]);
+                        rvec_inc(fshift[is], buf[n]);
                         n++;
                     }
                 }
             }
             else
             {
-                for (i = 0; i < ind->nsend[nzone]; i++)
+                for (int i = 0; i < ind->nsend[nzone]; i++)
                 {
-                    at0 = cgindex[index[i]];
-                    at1 = cgindex[index[i]+1];
-                    for (j = at0; j < at1; j++)
+                    int at0 = cgindex[index[i]];
+                    int at1 = cgindex[index[i]+1];
+					auto buf = getBuf(d, p);
+                    for (int j = at0; j < at1; j++)
                     {
                         /* Rotate the force */
-                        f[j][XX] += getBuf(p)[n][XX];
-                        f[j][YY] -= getBuf(p)[n][YY];
-                        f[j][ZZ] -= getBuf(p)[n][ZZ];
+                        f[j][XX] += buf[n][XX];
+                        f[j][YY] -= buf[n][YY];
+                        f[j][ZZ] -= buf[n][ZZ];
                         if (fshift)
                         {
                             /* Add this force to the shift force */
-                            rvec_inc(fshift[is], getBuf(p)[n]);
+                            rvec_inc(fshift[is], buf[n]);
                         }
                         n++;
                     }
