@@ -122,6 +122,45 @@ void dd_sendrecv_real(const struct gmx_domdec_t gmx_unused *dd,
 #endif
 }
 
+std::vector<MPI_Request> async_dd_sendrecv_rvec(const struct gmx_domdec_t gmx_unused *dd,
+	int gmx_unused ddimind, int gmx_unused direction,
+	rvec gmx_unused *buf_s, int gmx_unused n_s,
+	rvec gmx_unused *buf_r, int gmx_unused n_r)
+{
+#if GMX_MPI
+	int        rank_s, rank_r;
+	MPI_Status stat;
+
+	rank_s = dd->neighbor[ddimind][direction == dddirForward ? 0 : 1];
+	rank_r = dd->neighbor[ddimind][direction == dddirForward ? 1 : 0];
+
+	std::vector<MPI_Request> requests;
+	if (n_s && n_r)
+	{
+		MPI_Request req;
+		MPI_Isend(buf_s[0], n_s * sizeof(rvec), MPI_BYTE, rank_s, 0, dd->mpi_comm_all, &req);
+		requests.push_back(req);
+		MPI_Irecv(buf_r[0], n_r * sizeof(rvec), MPI_BYTE, rank_r, 0, dd->mpi_comm_all, &req);
+		requests.push_back(req);
+	}
+	else if (n_s)
+	{
+		MPI_Request req;
+		MPI_Isend(buf_s[0], n_s * sizeof(rvec), MPI_BYTE, rank_s, 0,
+			dd->mpi_comm_all, &req);
+		requests.push_back(req);
+	}
+	else if (n_r)
+	{
+		MPI_Request req;
+		MPI_Irecv(buf_r[0], n_r * sizeof(rvec), MPI_BYTE, rank_r, 0,
+			dd->mpi_comm_all, &req);
+		requests.push_back(req);
+	}
+	return requests;
+#endif
+}
+
 void dd_sendrecv_rvec(const struct gmx_domdec_t gmx_unused *dd,
                       int gmx_unused ddimind, int gmx_unused direction,
                       rvec gmx_unused *buf_s, int gmx_unused n_s,

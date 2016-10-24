@@ -47,6 +47,9 @@
 #include <string.h>
 
 #include <algorithm>
+#include <iostream>
+#include <vector>
+#include <iterator>
 
 #include "gromacs/domdec/domdec_network.h"
 #include "gromacs/domdec/ga2la.h"
@@ -503,31 +506,58 @@ void dd_move_f(gmx_domdec_t *dd, rvec f[], rvec *fshift)
         is              = IVEC2IS(vis);
 
         cd = &comm->cd[d];
-        for (p = cd->np-1; p >= 0; p--)
-        {
-            ind      = &cd->ind[p];
-            nat_tot -= ind->nrecv[nzone+1];
-            if (cd->bInPlace)
-            {
-                sbuf = f + nat_tot;
-            }
-            else
-            {
-                sbuf = comm->vbuf2.v;
-                j    = 0;
-                for (zone = 0; zone < nzone; zone++)
-                {
-                    for (i = ind->cell2at0[zone]; i < ind->cell2at1[zone]; i++)
-                    {
-                        copy_rvec(f[i], sbuf[j]);
-                        j++;
-                    }
-                }
-            }
-            /* Communicate the forces */
-            dd_sendrecv_rvec(dd, d, dddirForward,
-                             sbuf, ind->nrecv[nzone+1],
-                             buf,  ind->nsend[nzone+1]);
+		std::size_t masterBufSize = cd->np * comm->vbuf.nalloc;
+		auto masterBuf = std::unique_ptr<rvec>(new rvec[masterBufSize]);
+		auto getBuf = [&](std::size_t idx) {return masterBuf.get() + (comm->vbuf.nalloc * idx); };
+		std::vector<MPI_Request> masterRequests;
+		for (p = cd->np - 1; p >= 0; p--)
+		{
+			ind = &cd->ind[p];
+			nat_tot -= ind->nrecv[nzone + 1];
+			if (cd->bInPlace)
+			{
+				sbuf = f + nat_tot;
+			}
+			else
+			{
+				sbuf = comm->vbuf2.v;
+				j = 0;
+				for (zone = 0; zone < nzone; zone++)
+				{
+					for (i = ind->cell2at0[zone]; i < ind->cell2at1[zone]; i++)
+					{
+						copy_rvec(f[i], sbuf[j]);
+						j++;
+					}
+				}
+			}
+			//{
+			//	int trcRank;
+			//	MPI_Comm_rank(MPI_COMM_WORLD, &trcRank);
+			//	std::cout << "Rank: " << trcRank <<
+			//		" dd: " << dd <<
+			//		" d: " << d <<
+			//		" dddirForward: " << dddirForward <<
+			//		" sbuf: " << sbuf <<
+			//		" ind->nrecv[nzone+1]: " << ind->nrecv[nzone + 1] <<
+			//		" buf: " << buf <<
+			//		" ind->nsend[nzone+1]: " << ind->nsend[nzone + 1] <<
+			//		"\n";
+			//}
+			/* Communicate the forces */
+			std::vector<MPI_Request> reqs =
+				async_dd_sendrecv_rvec(
+					dd, d, dddirForward,
+					sbuf, ind->nrecv[nzone + 1],
+					getBuf(p), ind->nsend[nzone + 1]);
+			std::copy(reqs.begin(), reqs.end(), std::back_inserter(masterRequests));
+		}
+
+		MPI_Waitall(masterRequests.size(), masterRequests.data(), MPI_STATUSES_IGNORE);
+
+		for (p = cd->np - 1; p >= 0; p--)
+		{
+			ind = &cd->ind[p];
             index = ind->index;
             /* Add the received forces */
             n = 0;
@@ -539,7 +569,7 @@ void dd_move_f(gmx_domdec_t *dd, rvec f[], rvec *fshift)
                     at1 = cgindex[index[i]+1];
                     for (j = at0; j < at1; j++)
                     {
-                        rvec_inc(f[j], buf[n]);
+                        rvec_inc(f[j], getBuf(p)[n]);
                         n++;
                     }
                 }
@@ -555,9 +585,9 @@ void dd_move_f(gmx_domdec_t *dd, rvec f[], rvec *fshift)
                     at1 = cgindex[index[i]+1];
                     for (j = at0; j < at1; j++)
                     {
-                        rvec_inc(f[j], buf[n]);
+                        rvec_inc(f[j], getBuf(p)[n]);
                         /* Add this force to the shift force */
-                        rvec_inc(fshift[is], buf[n]);
+                        rvec_inc(fshift[is], getBuf(p)[n]);
                         n++;
                     }
                 }
@@ -571,13 +601,13 @@ void dd_move_f(gmx_domdec_t *dd, rvec f[], rvec *fshift)
                     for (j = at0; j < at1; j++)
                     {
                         /* Rotate the force */
-                        f[j][XX] += buf[n][XX];
-                        f[j][YY] -= buf[n][YY];
-                        f[j][ZZ] -= buf[n][ZZ];
+                        f[j][XX] += getBuf(p)[n][XX];
+                        f[j][YY] -= getBuf(p)[n][YY];
+                        f[j][ZZ] -= getBuf(p)[n][ZZ];
                         if (fshift)
                         {
                             /* Add this force to the shift force */
-                            rvec_inc(fshift[is], buf[n]);
+                            rvec_inc(fshift[is], getBuf(p)[n]);
                         }
                         n++;
                     }
