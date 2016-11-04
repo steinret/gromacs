@@ -50,6 +50,7 @@
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/gmxmpi.h"
 #include "gromacs/utility/real.h"
+#include "gromacs/ewald/pme.h"
 
 //! Max number of zones in domain decomposition
 #define DD_MAXZONE  8
@@ -207,6 +208,9 @@ struct gmx_domdec_t {
     int   pme_recv_f_alloc;
     rvec *pme_recv_f_buf;
 
+	MPI_Request receive_virial_energy;
+	gmx_pme_comm_vir_ene_t cve;
+	MPI_Request gmx_pme_receive_f;
 };
 
 #endif

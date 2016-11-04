@@ -151,21 +151,6 @@ struct gmx_pme_comm_n_box_t {
     //@}
 };
 
-/*! \brief Helper struct for PP-PME communication of virial and energy */
-typedef struct {
-    //@{
-    /*! \brief Virial, energy, and derivative of potential w.r.t. lambda for charge and Lennard-Jones */
-    matrix          vir_q;
-    matrix          vir_lj;
-    real            energy_q;
-    real            energy_lj;
-    real            dvdlambda_q;
-    real            dvdlambda_lj;
-    //@}
-    float           cycles;     /**< Counter of CPU cycles used */
-    gmx_stop_cond_t stop_cond;  /**< Flag used in responding to an external signal to terminate */
-} gmx_pme_comm_vir_ene_t;
-
 gmx_pme_pp_t gmx_pme_pp_init(t_commrec *cr)
 {
     struct gmx_pme_pp *pme_pp;
@@ -702,6 +687,63 @@ int gmx_pme_recv_coeffs_coords(struct gmx_pme_pp *pme_pp,
 
     return status;
 }
+
+static void begin_receive_virial_energy(t_commrec *cr)
+{
+	gmx_pme_comm_vir_ene_t* cve = &cr->dd->cve;
+
+	if (cr->dd->pme_receive_vir_ener)
+	{
+		if (debug)
+		{
+			fprintf(debug,
+				"PP rank %d receiving from PME rank %d: virial and energy\n",
+				cr->sim_nodeid, cr->dd->pme_nodeid);
+		}
+#if GMX_MPI
+		MPI_Irecv(cve, sizeof(gmx_pme_comm_vir_ene_t), MPI_BYTE, cr->dd->pme_nodeid, 1, cr->mpi_comm_mysim,
+			&cr->dd->receive_virial_energy);
+#else
+		memset(cve, 0, sizeof(gmx_pme_comm_vir_ene_t));
+#endif
+	}
+}
+
+static void end_receive_virial_energy(t_commrec *cr,
+	matrix vir_q, real *energy_q,
+	matrix vir_lj, real *energy_lj,
+	real *dvdlambda_q, real *dvdlambda_lj,
+	float *pme_cycles)
+{
+	gmx_pme_comm_vir_ene_t cve;
+
+	if (cr->dd->pme_receive_vir_ener)
+	{
+		MPI_Wait(&cr->dd->receive_virial_energy, MPI_STATUS_IGNORE);
+		gmx_pme_comm_vir_ene_t* cve = &cr->dd->cve;
+
+		m_add(vir_q, cve->vir_q, vir_q);
+		m_add(vir_lj, cve->vir_lj, vir_lj);
+		*energy_q = cve->energy_q;
+		*energy_lj = cve->energy_lj;
+		*dvdlambda_q += cve->dvdlambda_q;
+		*dvdlambda_lj += cve->dvdlambda_lj;
+		*pme_cycles = cve->cycles;
+
+		if (cve->stop_cond != gmx_stop_cond_none)
+		{
+			gmx_set_stop_condition(cve->stop_cond);
+		}
+	}
+	else
+	{
+		*energy_q = 0;
+		*energy_lj = 0;
+		*pme_cycles = 0;
+	}
+}
+
+
 /*! \brief Receive virial and energy from PME rank */
 static void receive_virial_energy(t_commrec *cr,
                                   matrix vir_q, real *energy_q,
@@ -746,6 +788,60 @@ static void receive_virial_energy(t_commrec *cr,
         *pme_cycles = 0;
     }
 }
+
+void begin_gmx_pme_receive_f(t_commrec *cr) {
+	int natoms = cr->dd->nat_home;
+
+	if (natoms > cr->dd->pme_recv_f_alloc)
+	{
+		cr->dd->pme_recv_f_alloc = over_alloc_dd(natoms);
+		srenew(cr->dd->pme_recv_f_buf, cr->dd->pme_recv_f_alloc);
+	}
+
+	MPI_Request req;
+	MPI_Irecv(cr->dd->pme_recv_f_buf[0],
+		natoms * sizeof(rvec), MPI_BYTE,
+		cr->dd->pme_nodeid, 0, cr->mpi_comm_mysim,
+		&cr->dd->gmx_pme_receive_f);
+
+	begin_receive_virial_energy(cr);
+}
+
+void end_gmx_pme_receive_f(t_commrec *cr,
+	rvec f[], matrix vir_q, real *energy_q,
+	matrix vir_lj, real *energy_lj,
+	real *dvdlambda_q, real *dvdlambda_lj,
+	float *pme_cycles)
+{
+#if GMX_MPI
+	MPI_Wait(&cr->dd->gmx_pme_receive_f, MPI_STATUS_IGNORE);
+#endif
+
+	int natoms = cr->dd->nat_home;
+	int nt = gmx_omp_nthreads_get_simple_rvec_task(emntDefault, natoms);
+
+	/* Note that we would like to avoid this conditional by putting it
+	* into the omp pragma instead, but then we still take the full
+	* omp parallel for overhead (at least with gcc5).
+	*/
+	if (nt == 1)
+	{
+		for (int i = 0; i < natoms; i++)
+		{
+			rvec_inc(f[i], cr->dd->pme_recv_f_buf[i]);
+		}
+	}
+	else
+	{
+#pragma omp parallel for num_threads(nt) schedule(static)
+		for (int i = 0; i < natoms; i++)
+		{
+			rvec_inc(f[i], cr->dd->pme_recv_f_buf[i]);
+		}
+	}
+	end_receive_virial_energy(cr, vir_q, energy_q, vir_lj, energy_lj, dvdlambda_q, dvdlambda_lj, pme_cycles);
+}
+
 
 void gmx_pme_receive_f(t_commrec *cr,
                        rvec f[], matrix vir_q, real *energy_q,

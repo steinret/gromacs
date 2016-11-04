@@ -356,6 +356,43 @@ static void pull_potential_wrapper(t_commrec *cr,
     wallcycle_stop(wcycle, ewcPULLPOT);
 }
 
+static void begin_pme_receive_force_ener(t_commrec *cr)
+{
+	begin_gmx_pme_receive_f(cr);
+}
+
+static void end_pme_receive_force_ener(t_commrec *cr,
+	gmx_wallcycle_t wcycle,
+	gmx_enerdata_t *enerd,
+	t_forcerec     *fr)
+{
+	real   e_q, e_lj, dvdl_q, dvdl_lj;
+	float  cycles_ppdpme, cycles_seppme;
+
+	cycles_ppdpme = wallcycle_stop(wcycle, ewcPPDURINGPME);
+	dd_cycles_add(cr->dd, cycles_ppdpme, ddCyclPPduringPME);
+
+	/* In case of node-splitting, the PP nodes receive the long-range
+	* forces, virial and energy from the PME nodes here.
+	*/
+	wallcycle_start(wcycle, ewcPP_PMEWAITRECVF);
+	dvdl_q = 0;
+	dvdl_lj = 0;
+	end_gmx_pme_receive_f(cr, fr->f_novirsum, fr->vir_el_recip, &e_q,
+		fr->vir_lj_recip, &e_lj, &dvdl_q, &dvdl_lj,
+		&cycles_seppme);
+	enerd->term[F_COUL_RECIP] += e_q;
+	enerd->term[F_LJ_RECIP] += e_lj;
+	enerd->dvdl_lin[efptCOUL] += dvdl_q;
+	enerd->dvdl_lin[efptVDW] += dvdl_lj;
+
+	if (wcycle)
+	{
+		dd_cycles_add(cr->dd, cycles_seppme, ddCyclPME);
+	}
+	wallcycle_stop(wcycle, ewcPP_PMEWAITRECVF);
+}
+
 static void pme_receive_force_ener(t_commrec      *cr,
                                    gmx_wallcycle_t wcycle,
                                    gmx_enerdata_t *enerd,
@@ -1035,6 +1072,14 @@ void do_force_cutsVERLET(FILE *fplog, t_commrec *cr,
         wallcycle_stop(wcycle, ewcLAUNCH_GPU_NB);
     }
 
+	if (PAR(cr) && !(cr->duty & DUTY_PME))
+	{
+		/* In case of node-splitting, the PP nodes receive the long-range
+		* forces, virial and energy from the PME nodes here.
+		*/
+		begin_pme_receive_force_ener(cr);
+	}
+
     /* Communicate coordinates and sum dipole if necessary +
        do non-local pair search */
     if (DOMAINDECOMP(cr))
@@ -1527,7 +1572,7 @@ void do_force_cutsVERLET(FILE *fplog, t_commrec *cr,
         /* In case of node-splitting, the PP nodes receive the long-range
          * forces, virial and energy from the PME nodes here.
          */
-        pme_receive_force_ener(cr, wcycle, enerd, fr);
+        end_pme_receive_force_ener(cr, wcycle, enerd, fr);
     }
 
     if (bDoForces)

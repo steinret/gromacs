@@ -58,6 +58,7 @@
 #include "gromacs/timing/walltime_accounting.h"
 #include "gromacs/utility/basedefinitions.h"
 #include "gromacs/utility/real.h"
+#include "gromacs/mdlib/sighandler.h"
 
 struct t_commrec;
 struct t_inputrec;
@@ -172,5 +173,27 @@ void gmx_pme_receive_f(struct t_commrec *cr,
                        matrix vir_lj, real *energy_lj,
                        real *dvdlambda_q, real *dvdlambda_lj,
                        float *pme_cycles);
+
+void begin_gmx_pme_receive_f(t_commrec *cr);
+void end_gmx_pme_receive_f(t_commrec *cr,
+	rvec f[], matrix vir_q, real *energy_q,
+	matrix vir_lj, real *energy_lj,
+	real *dvdlambda_q, real *dvdlambda_lj,
+	float *pme_cycles);
+
+/*! \brief Helper struct for PP-PME communication of virial and energy */
+typedef struct {
+	//@{
+	/*! \brief Virial, energy, and derivative of potential w.r.t. lambda for charge and Lennard-Jones */
+	matrix          vir_q;
+	matrix          vir_lj;
+	real            energy_q;
+	real            energy_lj;
+	real            dvdlambda_q;
+	real            dvdlambda_lj;
+	//@}
+	float           cycles;     /**< Counter of CPU cycles used */
+	gmx_stop_cond_t stop_cond;  /**< Flag used in responding to an external signal to terminate */
+} gmx_pme_comm_vir_ene_t;
 
 #endif
