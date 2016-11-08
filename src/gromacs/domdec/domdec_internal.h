@@ -45,12 +45,64 @@
 
 #include "config.h"
 
+#include <unordered_map>
+#include <memory>
 #include "gromacs/domdec/domdec.h"
 #include "gromacs/domdec/domdec_struct.h"
 #include "gromacs/mdtypes/commrec.h"
 #include "gromacs/topology/block.h"
 
 /*! \cond INTERNAL */
+
+
+class buffermanager {
+	struct index {
+		int key0;
+		int key1;
+		int key2;
+
+		friend bool operator==(const index &left, const index &right)
+		{
+			return (left.key0 == right.key0
+				&& left.key1 == right.key1
+				&& left.key2 == right.key2);
+		}
+	};
+
+	struct indexHasher
+	{
+		std::size_t operator()(const index& k) const
+		{
+			std::size_t res = 17;
+			res = res * 31 + std::hash<int>()(k.key0);
+			res = res * 31 + std::hash<int>()(k.key1);
+			res = res * 31 + std::hash<int>()(k.key2);
+			return res;
+		}
+	};
+	struct buffer {
+		std::size_t size = 0;
+		std::unique_ptr<rvec[]> buf;
+	};
+	std::unordered_map<index, buffer, indexHasher> data;
+
+	buffermanager() = default;
+public:
+	public:
+		static buffermanager& instance() { 
+			static buffermanager game; 
+			return game; 
+		}
+
+	rvec* getBuffer(int key0, int key1, int key2, std::size_t min_size) {
+		auto& buf = data[index{ key0, key1, key2 }];
+		if (buf.size < min_size) {
+			buf.buf.reset(new rvec[min_size]);
+			buf.size = min_size;
+		}
+		return buf.buf.get();
+	}
+};
 
 typedef struct
 {

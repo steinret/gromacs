@@ -47,6 +47,9 @@
 #include <string.h>
 
 #include <algorithm>
+#include "mpi.h"
+#include <vector>
+#include <iterator>
 
 #include "gromacs/domdec/domdec_network.h"
 #include "gromacs/domdec/ga2la.h"
@@ -357,6 +360,134 @@ void dd_get_constraint_range(const gmx_domdec_t *dd, int *at_start, int *at_end)
     *at_end   = dd->comm->nat[ddnatCON];
 }
 
+void async_dd_move_x(gmx_domdec_t *dd, matrix box, rvec x[])
+{
+	int                    nzone, nat_tot, n, d, p, i, j, at0, at1, zone;
+	int                   *index, *cgindex;
+	gmx_domdec_comm_t     *comm;
+	gmx_domdec_comm_dim_t *cd;
+	gmx_domdec_ind_t      *ind;
+	rvec                   shift = { 0, 0, 0 }, *buf, *rbuf;
+	gmx_bool               bPBC, bScrew;
+
+	comm = dd->comm;
+
+	cgindex = dd->cgindex;
+
+	buf = comm->vbuf.v;
+
+	nzone = 1;
+	nat_tot = dd->nat_home;
+	for (d = 0; d < dd->ndim; d++)
+	{
+		bPBC = (dd->ci[dd->dim[d]] == 0);
+		bScrew = (bPBC && dd->bScrewPBC && dd->dim[d] == XX);
+		if (bPBC)
+		{
+			copy_rvec(box[dd->dim[d]], shift);
+		}
+
+		std::vector<MPI_Request> requests;
+		cd = &comm->cd[d];
+		for (p = 0; p < cd->np; p++)
+		{
+			ind = &cd->ind[p];
+			index = ind->index;
+			n = 0;
+			if (!bPBC)
+			{
+				for (i = 0; i < ind->nsend[nzone]; i++)
+				{
+					at0 = cgindex[index[i]];
+					at1 = cgindex[index[i] + 1];
+					for (j = at0; j < at1; j++)
+					{
+						copy_rvec(x[j], buf[n]);
+						n++;
+					}
+				}
+			}
+			else if (!bScrew)
+			{
+				for (i = 0; i < ind->nsend[nzone]; i++)
+				{
+					at0 = cgindex[index[i]];
+					at1 = cgindex[index[i] + 1];
+					for (j = at0; j < at1; j++)
+					{
+						/* We need to shift the coordinates */
+						rvec_add(x[j], shift, buf[n]);
+						n++;
+					}
+				}
+			}
+			else
+			{
+				for (i = 0; i < ind->nsend[nzone]; i++)
+				{
+					at0 = cgindex[index[i]];
+					at1 = cgindex[index[i] + 1];
+					for (j = at0; j < at1; j++)
+					{
+						/* Shift x */
+						buf[n][XX] = x[j][XX] + shift[XX];
+						/* Rotate y and z.
+						* This operation requires a special shift force
+						* treatment, which is performed in calc_vir.
+						*/
+						buf[n][YY] = box[YY][YY] - x[j][YY];
+						buf[n][ZZ] = box[ZZ][ZZ] - x[j][ZZ];
+						n++;
+					}
+				}
+			}
+
+			/* Send and receive the coordinates */
+			auto sendbuf = buffermanager::instance().getBuffer(d, p, 0, ind->nsend[nzone + 1]);
+			auto recvbuf = buffermanager::instance().getBuffer(d, p, 1, ind->nrecv[nzone + 1]);
+			memcpy(sendbuf, buf, ind->nsend[nzone + 1] * sizeof(rvec));
+			const auto reqs = async_dd_sendrecv_rvec(dd, d, dddirBackward,
+				sendbuf, ind->nsend[nzone + 1],
+				recvbuf, ind->nrecv[nzone + 1], 0);
+			std::copy(reqs.begin(), reqs.end(), std::back_inserter(requests));
+		}
+
+		MPI_Waitall(requests.size(), requests.data(), MPI_STATUSES_IGNORE);
+
+
+		for (p = 0; p < cd->np; p++)
+		{
+			ind = &cd->ind[p];
+			if (cd->bInPlace)
+			{
+				rbuf = x + nat_tot;
+			}
+			else
+			{
+				rbuf = comm->vbuf2.v;
+			}
+			/* Send and receive the coordinates */
+			auto recvbuf = buffermanager::instance().getBuffer(d, p, 1, ind->nrecv[nzone + 1]);
+			memcpy(rbuf, recvbuf, ind->nrecv[nzone + 1] * sizeof(rvec));
+
+			if (!cd->bInPlace)
+			{
+				j = 0;
+				for (zone = 0; zone < nzone; zone++)
+				{
+					for (i = ind->cell2at0[zone]; i < ind->cell2at1[zone]; i++)
+					{
+						copy_rvec(rbuf[j], x[i]);
+						j++;
+					}
+				}
+			}
+			nat_tot += ind->nrecv[nzone + 1];
+		}
+		nzone += nzone;
+	}
+}
+
 void dd_move_x(gmx_domdec_t *dd, matrix box, rvec x[])
 {
     int                    nzone, nat_tot, n, d, p, i, j, at0, at1, zone;
@@ -465,6 +596,143 @@ void dd_move_x(gmx_domdec_t *dd, matrix box, rvec x[])
         }
         nzone += nzone;
     }
+}
+
+void async_dd_move_f(gmx_domdec_t *dd, rvec f[], rvec *fshift)
+{
+	int                    nzone, nat_tot, n, d, p, i, j, at0, at1, zone;
+	int                   *index, *cgindex;
+	gmx_domdec_comm_t     *comm;
+	gmx_domdec_comm_dim_t *cd;
+	gmx_domdec_ind_t      *ind;
+	rvec                  *buf, *sbuf;
+	ivec                   vis;
+	int                    is;
+	gmx_bool               bShiftForcesNeedPbc, bScrew;
+
+	comm = dd->comm;
+
+	cgindex = dd->cgindex;
+
+	buf = comm->vbuf.v;
+
+	nzone = comm->zones.n / 2;
+	nat_tot = dd->nat_tot;
+	for (d = dd->ndim - 1; d >= 0; d--)
+	{
+		/* Only forces in domains near the PBC boundaries need to
+		consider PBC in the treatment of fshift */
+		bShiftForcesNeedPbc = (dd->ci[dd->dim[d]] == 0);
+		bScrew = (bShiftForcesNeedPbc && dd->bScrewPBC && dd->dim[d] == XX);
+		if (fshift == NULL && !bScrew)
+		{
+			bShiftForcesNeedPbc = FALSE;
+		}
+		/* Determine which shift vector we need */
+		clear_ivec(vis);
+		vis[dd->dim[d]] = 1;
+		is = IVEC2IS(vis);
+
+		std::vector<MPI_Request> requests;
+
+		cd = &comm->cd[d];
+		for (p = cd->np - 1; p >= 0; p--)
+		{
+			ind = &cd->ind[p];
+			nat_tot -= ind->nrecv[nzone + 1];
+			if (cd->bInPlace)
+			{
+				sbuf = f + nat_tot;
+			}
+			else
+			{
+				sbuf = comm->vbuf2.v;
+				j = 0;
+				for (zone = 0; zone < nzone; zone++)
+				{
+					for (i = ind->cell2at0[zone]; i < ind->cell2at1[zone]; i++)
+					{
+						copy_rvec(f[i], sbuf[j]);
+						j++;
+					}
+				}
+			}
+			/* Communicate the forces */
+			auto sendbuf = buffermanager::instance().getBuffer(d, p, 0, ind->nrecv[nzone + 1]);
+			auto recvbuf = buffermanager::instance().getBuffer(d, p, 1, ind->nsend[nzone + 1]);
+			memcpy(sendbuf, sbuf, ind->nrecv[nzone + 1] * sizeof(rvec));
+			const auto reqs = async_dd_sendrecv_rvec(dd, d, dddirForward,
+				sendbuf, ind->nrecv[nzone + 1],
+				recvbuf, ind->nsend[nzone + 1], 0);
+			std::copy(reqs.begin(), reqs.end(), std::back_inserter(requests));
+		}
+
+		MPI_Waitall(requests.size(), requests.data(), MPI_STATUSES_IGNORE);
+
+		for (p = cd->np - 1; p >= 0; p--)
+		{
+			ind = &cd->ind[p];
+			/* Communicate the forces */
+			auto recvbuf = buffermanager::instance().getBuffer(d, p, 1, ind->nsend[nzone + 1]);
+			memcpy(buf, recvbuf, ind->nsend[nzone + 1] * sizeof(rvec));
+			index = ind->index;
+			/* Add the received forces */
+			n = 0;
+			if (!bShiftForcesNeedPbc)
+			{
+				for (i = 0; i < ind->nsend[nzone]; i++)
+				{
+					at0 = cgindex[index[i]];
+					at1 = cgindex[index[i] + 1];
+					for (j = at0; j < at1; j++)
+					{
+						rvec_inc(f[j], buf[n]);
+						n++;
+					}
+				}
+			}
+			else if (!bScrew)
+			{
+				/* fshift should always be defined if this function is
+				* called when bShiftForcesNeedPbc is true */
+				assert(NULL != fshift);
+				for (i = 0; i < ind->nsend[nzone]; i++)
+				{
+					at0 = cgindex[index[i]];
+					at1 = cgindex[index[i] + 1];
+					for (j = at0; j < at1; j++)
+					{
+						rvec_inc(f[j], buf[n]);
+						/* Add this force to the shift force */
+						rvec_inc(fshift[is], buf[n]);
+						n++;
+					}
+				}
+			}
+			else
+			{
+				for (i = 0; i < ind->nsend[nzone]; i++)
+				{
+					at0 = cgindex[index[i]];
+					at1 = cgindex[index[i] + 1];
+					for (j = at0; j < at1; j++)
+					{
+						/* Rotate the force */
+						f[j][XX] += buf[n][XX];
+						f[j][YY] -= buf[n][YY];
+						f[j][ZZ] -= buf[n][ZZ];
+						if (fshift)
+						{
+							/* Add this force to the shift force */
+							rvec_inc(fshift[is], buf[n]);
+						}
+						n++;
+					}
+				}
+			}
+		}
+		nzone /= 2;
+	}
 }
 
 void dd_move_f(gmx_domdec_t *dd, rvec f[], rvec *fshift)

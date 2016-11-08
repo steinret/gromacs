@@ -1090,7 +1090,8 @@ void do_force_cutsVERLET(FILE *fplog, t_commrec *cr,
         else
         {
             wallcycle_start(wcycle, ewcMOVEX);
-            dd_move_x(cr->dd, box, x);
+            //dd_move_x(cr->dd, box, x);
+			async_dd_move_x(cr->dd, box, x);
             wallcycle_stop(wcycle, ewcMOVEX);
 
             wallcycle_start(wcycle, ewcNB_XF_BUF_OPS);
@@ -1379,7 +1380,8 @@ void do_force_cutsVERLET(FILE *fplog, t_commrec *cr,
 
         /* Communicate the forces */
         wallcycle_start(wcycle, ewcMOVEF);
-        dd_move_f(cr->dd, f, fr->fshift);
+        //dd_move_f(cr->dd, f, fr->fshift);
+		async_dd_move_f(cr->dd, f, fr->fshift);
         wallcycle_stop(wcycle, ewcMOVEF);
     }
 

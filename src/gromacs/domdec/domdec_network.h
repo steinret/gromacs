@@ -49,6 +49,8 @@
 #define GMX_DOMDEC_DOMDEC_NETWORK_H
 
 #include "gromacs/math/vectypes.h"
+#include "mpi.h"
+#include <vector>
 
 struct gmx_domdec_t;
 
@@ -79,6 +81,11 @@ dd_sendrecv_real(const struct gmx_domdec_t *dd,
                  int ddimind, int direction,
                  real *buf_s, int n_s,
                  real *buf_r, int n_r);
+
+std::vector<MPI_Request> async_dd_sendrecv_rvec(const struct gmx_domdec_t *dd,
+	int ddimind, int direction,
+	rvec *buf_s, int n_s,
+	rvec *buf_r, int n_r, int tag);
 
 /*! \brief Move revc's in the comm. region one cell along the domain decomposition
  *
